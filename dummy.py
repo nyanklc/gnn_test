@@ -4,109 +4,67 @@ from torch.nn import Linear, Module
 from torch_geometric.nn import MessagePassing, Aggregation, GAT
 from torch_geometric.utils import add_self_loops, degree
 import torch.nn.functional as F
+from torch_geometric.utils import to_undirected
+from torch_geometric.data import Data
+from model import *
 
-class SSAggregation(Aggregation):
-    def __init__(self, ss_state_mat, ss_input_mat):
-        super().__init__()
-        self.ss_state_mat = ss_state_mat
-        self.ss_input_mat = ss_input_mat
+if __name__ == "__main__":
+    edge_index = torch.tensor([
+        [0, 0, 0, 0, 1, 1, 1, 2, 2, 3],
+        [1, 2, 3, 4, 2, 3, 4, 3, 4, 4]
+    ], dtype=torch.long)
 
-    def forward(self, x, index, **kwargs):
-        print(f"hello aggregate forward inputs: {x.shape}, index: {index.shape}")
-        # grouped = torch_scatter.scatter(x, index, dim=0) # this needs a reduction method
+    edge_index = to_undirected(edge_index)   # make bidirectional
 
-        # Sort by index so groups are contiguous
-        sorted_index, perm = torch.sort(index)
-        x_sorted = x[perm]
-        # Find group boundaries (where index changes)
-        boundaries = torch.where(sorted_index[1:] != sorted_index[:-1])[0] + 1
-        boundaries = boundaries.cpu() # only the boundaries need to be on CPU
-        groups = torch.tensor_split(x_sorted, boundaries)
-        unique_nodes = sorted_index[boundaries - 1].unique(sorted=True)
+    num_nodes = 5
+    num_features = 8
+    num_classes = 2
 
-        results = [self.ss_aggregate(g) for g in groups]
+    x = torch.randn(num_nodes, num_features)
+    y = torch.randint(0, num_classes, (num_nodes,))
 
-        print(f"before out results: {len(results)} results[0]: {results[0].shape}")
-        out = torch.stack(results, dim=0)
-        print(f"after out out: {out.shape}")
-        return out
+    data = Data(x=x, edge_index=edge_index, y=y)
 
-    def ss_aggregate(self, g):
-        # print(f"hello aggregate olala g: {g.shape}")
-        return torch.sum(g, dim=0)
-        # TODO: self-messages with state matrix
-        return torch.matmul(self.ss_input_mat, torch.sum(g, dim=0))
+    print(f"DATA: {data}")
+    print(f"x: {x}")
+    print(f"edge_index: {edge_index}")
+    print(f"y: {y}")
 
-# state space message passing graph neural network
-# x(t+1) = A * x(t) + B * u(t); dimx = dimu
-class SSMPGNNLayer(MessagePassing):
-    # we want to share the state and input matrices across layers, so they will be managed by a higher level structure
-    def __init__(self, in_features, out_features, aggr):
-        super().__init__(aggr=aggr)
-        self.lin = Linear(in_features, out_features, bias=False)
+    # ------------------------------
+    # Instantiate model
+    # ------------------------------
 
-    def forward(self, x, edge_index):
-        print(f"FORWARD x: {x.shape} edge_index: {edge_index.shape}")
-        # x has shape [N, in_channels]
-        # edge_index has shape [2, E]
-        # edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
-        x = self.lin(x)
-        return self.propagate(edge_index, size=(x.size(0), x.size(0)), x=x)
+    walk_embedding_size = 16 # embedding on walks
+    att_embedding_size = 4 # embedding done by gat
+    embedding_size = 128 # final embedding size
+    att_heads = 1
+    random_walk_length = 4 # including starting node
+    neigh_aggr = "mean"
+    walk_embedder = WalkEmbedder(random_walk_length=random_walk_length-1, embedding_size=walk_embedding_size)
+    model = WalkingMessagesModel(
+        neigh_aggr=neigh_aggr,
+        att_in_channels=num_features,
+        att_embedding_size=att_embedding_size,
+        att_heads=att_heads,
+        embedding_size=embedding_size,
+        walk_embedder=walk_embedder,
+    )
 
-    def message(self, x_j):
-        print(f"hello message x_j: {x_j.shape}")
-        return x_j
+    _param_count = sum(p.numel() for p in model.parameters())
+    print(f"model initialized, parameter count: {_param_count}")
 
-    def update(self, aggr_out):
-        # aggr_out has shape [N, out_channels]
-        print(f"hello update aggr_out: {aggr_out.shape}")
-        return aggr_out
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
-class MyGNN(torch.nn.Module):
-    def __init__(self, in_channels, mplayer_size, out_channels, node_feature_size):
-        super().__init__()
+    # ------------------------------
+    # Train
+    # ------------------------------
+    print("Starting training loop...")
 
-        self.ss_state_mat = torch.rand((node_feature_size, node_feature_size)).cuda()
-        self.ss_input_mat = torch.rand((node_feature_size, node_feature_size)).cuda()
-        print(f"hello mygnn mat shapes: {self.ss_state_mat.shape}")
+    for epoch in range(20):
+        optimizer.zero_grad()
+        out = model(data)
+        loss = F.nll_loss(out, y)
+        loss.backward()
+        optimizer.step()
 
-        self.aggr = SSAggregation(self.ss_state_mat, self.ss_input_mat)
-
-        self.conv1 = SSMPGNNLayer(in_channels, mplayer_size, self.aggr)
-        self.conv2 = SSMPGNNLayer(mplayer_size, mplayer_size, self.aggr)
-        self.conv3 = SSMPGNNLayer(mplayer_size, mplayer_size, self.aggr)
-        self.gat = GAT(mplayer_size, mplayer_size, 2, out_channels)
-        # self.conv3 = SSMPGNNLayer(out_channels, out_channels, self.aggr)
-        # self.conv4 = SSMPGNNLayer(out_channels, out_channels, self.aggr)
-        # self.conv5 = SSMPGNNLayer(out_channels, out_channels, self.aggr)
-
-    def forward(self, x, edge_index):
-        # layer 1
-        x = self.conv1(x, edge_index)
-        x = F.leaky_relu(x)
-        x = F.dropout(x, p=0.5, training=self.training)
-
-        # layer 2
-        x = self.conv2(x, edge_index)
-        x = F.leaky_relu(x)
-        x = F.dropout(x, p=0.5, training=self.training)
-
-        x = self.conv3(x, edge_index)
-        x = self.gat(x, )
-
-        # # layer 3
-        # x = self.conv3(x, edge_index)
-        # x = F.leaky_relu(x)
-        # x = F.dropout(x, p=0.5, training=self.training)
-
-        # # layer 4
-        # x = self.conv4(x, edge_index)
-        # x = F.leaky_relu(x)
-        # x = F.dropout(x, p=0.5, training=self.training)
-
-        # # layer 5
-        # x = self.conv5(x, edge_index)
-        # x = F.leaky_relu(x)
-        # x = F.dropout(x, p=0.5, training=self.training)
-
-        return x
+        print(f"Epoch {epoch:02d} | Loss = {loss.item():.4f}")

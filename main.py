@@ -1,16 +1,13 @@
 import torch
+import torch_geometric
 from torch_geometric.datasets import Planetoid
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 import networkx as nx
 
-from model import MyGNN
+from model import WalkingMessagesModel, WalkEmbedder
 
-######################################################
-NR_EPOCHS = 100
-MPLAYER_SIZE = 500
-######################################################
 
 def visualize_dataset(dataset):
     data = dataset[0]
@@ -44,6 +41,8 @@ def visualize_dataset(dataset):
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"device: {device}")
 
+torch_geometric.seed_everything(2143466)
+
 dataset = Planetoid(root='/tmp/Cora', name='Cora')
 print(dataset)
 visualize_dataset(dataset)
@@ -71,11 +70,23 @@ print(f"Labels shape: {data.y.shape}")
 print(f"Device: {device}")
 print("==================================\n")
 
-model = MyGNN(
-    in_channels=in_channels,
-    mplayer_size=MPLAYER_SIZE,
-    out_channels=out_channels,
-    node_feature_size=MPLAYER_SIZE
+######################################################
+NR_EPOCHS = 100
+
+ATT_IN_CHANNELS = in_channels # ?
+ATT_OUT_CHANNELS = in_channels # ?
+ATT_HEADS = 4
+EMBEDDING_SIZE = 128
+RW_LENGTH = 32
+######################################################
+
+model = WalkingMessagesModel(
+  "mean",
+  ATT_IN_CHANNELS,
+  ATT_OUT_CHANNELS,
+  ATT_HEADS,
+  EMBEDDING_SIZE,   # output size
+  WalkEmbedder(RW_LENGTH, EMBEDDING_SIZE)
 ).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=5e-4)
 print(f"created model")
